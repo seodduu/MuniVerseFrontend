@@ -219,10 +219,16 @@ export default function AiCreatePage() {
   // ✅ 전역 생성 작업(genTask)의 단계 변화를 카드 뒷면 문구에 동기화
   useEffect(() => {
     if (!genTask) return;
+
+    // 컨텍스트에 진행 중/완료된 작업이 있으면 카드를 뒷면으로
+    setIsFlipped(true);
+
     if (genTask.phase === "converting") {
       setDisplayText("프롬프트 변환 중....\n잠시 기다려 주세요");
     } else if (genTask.convertedPrompt && genTask.phase === "generating") {
       setDisplayText(genTask.convertedPrompt);
+    } else if (genTask.phase === "preparing_audio") {
+      setDisplayText("오디오 준비 중....\n잠시만 기다려 주세요");
     } else if (genTask.phase === "completed") {
       setDisplayText("생성이 완료되었습니다.\n우측 하단 알림에서 확인하세요.");
     } else if (genTask.phase === "failed") {
