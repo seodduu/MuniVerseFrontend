@@ -67,6 +67,7 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
   const lastParams = useRef<StartParams | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attempts = useRef(0);
+  const restoring = useRef(true);
 
   const clearTimer = () => {
     if (pollTimer.current) {
@@ -101,7 +102,10 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
   // 마운트 시 서버에서 활성 job 복원
   useEffect(() => {
     let cancelled = false;
-    if (getCurrentUserId() === null) return;
+    if (getCurrentUserId() === null) {
+      restoring.current = false;
+      return;
+    }
     getActiveGeneration()
       .then((job) => {
         if (cancelled || !job) return;
@@ -109,7 +113,10 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
         attempts.current = 0;
         pollOnce(job.job_id);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        restoring.current = false;
+      });
     return () => {
       cancelled = true;
       clearTimer();
@@ -118,8 +125,8 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
 
   const startGeneration = useCallback(
     async (params: StartParams) => {
-      // 단일 작업 가드
-      if (task && ACTIVE_PHASES.includes(task.phase)) return;
+      // 단일 작업 가드: 마운트 시 복원이 끝나기 전이거나 이미 활성 작업이 있으면 무시
+      if (restoring.current || (task && ACTIVE_PHASES.includes(task.phase))) return;
       const trimmed = params.prompt.trim();
       const userId = getCurrentUserId();
       if (!trimmed || userId === null) return;
