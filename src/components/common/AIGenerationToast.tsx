@@ -20,7 +20,7 @@ export default function AIGenerationToast() {
     if (task && (task.phase === "completed" || task.phase === "failed")) {
       setMinimized(false);
     }
-  }, [task?.phase]);
+  }, [task]);
 
   const currentIndex = task ? ORDER.indexOf(task.phase) : -1;
   const isDone = task?.phase === "completed";

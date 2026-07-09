@@ -139,6 +139,7 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
       const userId = getCurrentUserId();
       if (!trimmed || userId === null) return;
       epoch.current++;
+      const myEpoch = epoch.current;
       lastParams.current = params;
 
       setTask({
@@ -160,6 +161,7 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
         } catch {
           /* 평문 프롬프트 */
         }
+        if (epoch.current !== myEpoch) return;
         setTask((prev) =>
           prev ? { ...prev, convertedPrompt: converted } : prev
         );
@@ -171,12 +173,14 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
           make_instrumental: params.makeInstrumental,
         });
 
+        if (epoch.current !== myEpoch) return;
         setTask((prev) =>
           prev
             ? { ...prev, jobId: res.job_id, phase: "generating", convertedPrompt: converted }
             : prev
         );
         attempts.current = 0;
+        if (epoch.current !== myEpoch) return;
         pollOnce(res.job_id);
       } catch (e: unknown) {
         const err = e as { response?: { status?: number } };
