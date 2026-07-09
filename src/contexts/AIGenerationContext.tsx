@@ -68,6 +68,7 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attempts = useRef(0);
   const restoring = useRef(true);
+  const epoch = useRef(0);
 
   const clearTimer = () => {
     if (pollTimer.current) {
@@ -79,7 +80,9 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
   // 단일 폴링 루프: jobId가 있고 활성 phase일 때만 동작
   const pollOnce = useCallback((jobId: number) => {
     clearTimer();
+    const myEpoch = epoch.current;
     pollTimer.current = setTimeout(async () => {
+      if (epoch.current !== myEpoch) return;
       if (attempts.current >= MAX_POLL_ATTEMPTS) {
         setTask((prev) =>
           prev ? { ...prev, phase: "failed", error: "시간이 초과되었습니다." } : prev
@@ -89,11 +92,13 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
       attempts.current += 1;
       try {
         const job = await getGenerationJob(jobId);
+        if (epoch.current !== myEpoch) return;
         setTask(jobToTask(job));
         if (job.phase === "generating" || job.phase === "preparing_audio") {
           pollOnce(jobId);
         }
       } catch {
+        if (epoch.current !== myEpoch) return;
         pollOnce(jobId); // 일시적 오류는 재시도
       }
     }, POLL_INTERVAL_MS);
@@ -102,16 +107,19 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
   // 마운트 시 서버에서 활성 job 복원
   useEffect(() => {
     let cancelled = false;
+    const myEpoch = epoch.current;
     if (getCurrentUserId() === null) {
       restoring.current = false;
       return;
     }
     getActiveGeneration()
       .then((job) => {
-        if (cancelled || !job) return;
+        if (cancelled || !job || epoch.current !== myEpoch) return;
         setTask(jobToTask(job));
         attempts.current = 0;
-        pollOnce(job.job_id);
+        if (job.phase === "generating" || job.phase === "preparing_audio") {
+          pollOnce(job.job_id);
+        }
       })
       .catch(() => {})
       .finally(() => {
@@ -130,6 +138,7 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
       const trimmed = params.prompt.trim();
       const userId = getCurrentUserId();
       if (!trimmed || userId === null) return;
+      epoch.current++;
       lastParams.current = params;
 
       setTask({
@@ -182,11 +191,13 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
   );
 
   const dismiss = useCallback(() => {
+    epoch.current++;
     clearTimer();
     setTask(null);
   }, []);
 
   const retry = useCallback(() => {
+    epoch.current++;
     const params = lastParams.current;
     clearTimer();
     setTask(null);
