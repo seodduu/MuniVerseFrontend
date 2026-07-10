@@ -327,7 +327,7 @@ export default function SearchHome() {
       try {
         setLoading(true);
         const params = new URLSearchParams({ q, page_size: "30" });
-        const res = await fetch(`${API_BASE}/search/opensearch?${params.toString()}`, {
+        const res = await fetch(`${API_BASE}/search?${params.toString()}`, {
           signal: controller.signal,
         });
         if (!res.ok) throw new Error(`API 오류: ${res.status}`);

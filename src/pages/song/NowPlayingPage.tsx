@@ -315,7 +315,7 @@ export default function NowPlayingPage() {
 
             try {
                 // 1) 제목으로 검색
-                const searchUrl = `${API_BASE}/search/opensearch?q=${encodeURIComponent(current.title)}`;
+                const searchUrl = `${API_BASE}/search?q=${encodeURIComponent(current.title)}`;
                 const searchRes = await fetch(searchUrl, {
                     method: "GET",
                     signal: controller.signal,
@@ -354,7 +354,7 @@ export default function NowPlayingPage() {
 
                 // 3) 조합 검색
                 const combinedSearch = `${current.artist} ${current.title}`;
-                const combinedSearchUrl = `${API_BASE}/search/opensearch?q=${encodeURIComponent(combinedSearch)}`;
+                const combinedSearchUrl = `${API_BASE}/search?q=${encodeURIComponent(combinedSearch)}`;
                 const combinedSearchRes = await fetch(combinedSearchUrl, {
                     method: "GET",
                     signal: controller.signal,
