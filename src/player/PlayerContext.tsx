@@ -344,6 +344,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      // 상대경로(백엔드 API 경로)를 백엔드 origin 기준 절대 URL로 변환
+      // (Player.tsx의 coverUrl 처리와 동일한 패턴)
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        const API_BASE = import.meta.env.VITE_API_BASE_URL as string | undefined;
+        if (API_BASE && url.startsWith("/")) {
+          url = `${API_BASE.replace("/api/v1", "")}${url}`;
+        }
+      }
+
       // URL이 변경되었을 때만 src 교체 (재생 중 끊김 방지)
       if (a.src !== url && a.src !== new URL(url, window.location.href).href) {
         a.src = url;
