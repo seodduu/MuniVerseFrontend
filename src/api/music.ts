@@ -317,13 +317,99 @@ export interface TagSearchResponse {
 }
 
 /**
+ * Canvas GraphRAG Search API
+ * GET /api/v1/canvas/graphrag?tags=summer,sad&limit=120
+ */
+export interface CanvasGraphRagResolvedTag {
+  tag_id: number;
+  tag_key: string;
+  tag_name: string;
+}
+
+export interface CanvasGraphRagMatchedTag {
+  tag_key: string;
+  tag_name: string;
+  score: number;
+}
+
+export interface CanvasGraphRagExplanation {
+  type: string;
+  path: string[];
+  weight: number;
+  reason: string;
+}
+
+export interface CanvasGraphRagItem {
+  music_id: number;
+  music_name: string;
+  artist_name: string | null;
+  album_name: string | null;
+  audio_url: string | null;
+  image_square?: string | null;
+  image_large_square?: string | null;
+  album_image?: string | null;
+  relevance_score: number;
+  visual_weight: number;
+  cluster?: string | null;
+  matched_tags?: CanvasGraphRagMatchedTag[];
+  explanations?: CanvasGraphRagExplanation[];
+}
+
+export interface CanvasGraphRagResponse {
+  status: "ok" | "empty_data" | "no_query_match" | "no_results" | string;
+  query: {
+    tags: string[];
+    resolved_tags: CanvasGraphRagResolvedTag[];
+    unresolved_tags: string[];
+  };
+  items: CanvasGraphRagItem[];
+  meta: {
+    returned: number;
+    data_state: string;
+    message?: string;
+    total_candidates?: number;
+    graph_version?: string;
+  };
+}
+
+export async function searchCanvasGraphRag(tags: string, limit: number = 120): Promise<CanvasGraphRagResponse> {
+  try {
+    console.log("[API] searchCanvasGraphRag 호출", { tags, limit });
+    const res = await axiosInstance.get<CanvasGraphRagResponse>('/canvas/graphrag', {
+      params: {
+        tags,
+        limit
+      }
+    });
+    console.log("[API] searchCanvasGraphRag 응답", res.data);
+    return res.data;
+  } catch (error) {
+    console.error("[API] searchCanvasGraphRag 실패", { tags, error });
+    return {
+      status: "error",
+      query: {
+        tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+        resolved_tags: [],
+        unresolved_tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+      },
+      items: [],
+      meta: {
+        returned: 0,
+        data_state: "api_error",
+        message: "GraphRAG 검색 중 오류가 발생했습니다."
+      }
+    };
+  }
+}
+
+/**
  * LISA의 MONEY 곡 정보를 가져오는 헬퍼 함수
  */
 async function getLisaMoneyTrack(): Promise<TagSearchResult | null> {
   try {
     // 1. LISA의 MONEY를 검색하여 찾기 시도
     try {
-      const searchRes = await axiosInstance.get('/search/opensearch', {
+      const searchRes = await axiosInstance.get('/search', {
         params: {
           q: 'LISA MONEY',
           page_size: 10
@@ -477,6 +563,11 @@ export interface CanvasAlbum {
   y: number;
   rotation: number;
   scale: number;
+  relevanceScore?: number;
+  visualWeight?: number;
+  cluster?: string | null;
+  matchedTags?: CanvasGraphRagMatchedTag[];
+  explanations?: CanvasGraphRagExplanation[];
 }
 
 /**
