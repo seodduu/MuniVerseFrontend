@@ -323,7 +323,7 @@ async function getLisaMoneyTrack(): Promise<TagSearchResult | null> {
   try {
     // 1. LISA의 MONEY를 검색하여 찾기 시도
     try {
-      const searchRes = await axiosInstance.get('/search/opensearch', {
+      const searchRes = await axiosInstance.get('/search', {
         params: {
           q: 'LISA MONEY',
           page_size: 10

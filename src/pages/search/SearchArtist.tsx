@@ -74,7 +74,7 @@ export default function SearchArtist() {
           page_size: "100",
         });
 
-        const res = await fetch(`${API_BASE}/search/opensearch?${params.toString()}`, {
+        const res = await fetch(`${API_BASE}/search?${params.toString()}`, {
           method: "GET",
           signal: controller.signal,
           headers: { "Content-Type": "application/json" },
