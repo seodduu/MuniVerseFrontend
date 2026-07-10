@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import InfiniteCanvas from "../../components/canvas/InfiniteCanvas";
 import AlbumDetailOverlay from "../../components/canvas/AlbumDetailOverlay";
 import MusicPlayerBar from "../../components/canvas/MusicPlayerBar";
-import { searchByTags, getCanvasAlbums, playTrack, type CanvasAlbum, type TagSearchResult } from "../../api/music";
+import { searchCanvasGraphRag, getCanvasAlbums, playTrack, type CanvasAlbum, type CanvasGraphRagItem } from "../../api/music";
 
 const CHUNK_SIZE = 1200; // Larger chunks for more spread
 const MAX_CHUNK_DIST = 2;
@@ -64,13 +64,17 @@ function generateNonOverlappingPositions(chunkX: number, chunkY: number, scales:
     return positions;
 }
 
-// Convert TagSearchResult to CanvasAlbum format
-function mapToCanvasAlbum(item: TagSearchResult): CanvasAlbum | null {
+function clamp(value: number, min: number, max: number) {
+    return Math.min(Math.max(value, min), max);
+}
+
+// Convert CanvasGraphRagItem to CanvasAlbum format
+function mapToCanvasAlbum(item: CanvasGraphRagItem): CanvasAlbum | null {
     const cover = item.image_large_square || item.image_square || item.album_image;
     if (!cover) return null;
 
-    const normalizedScore = item.score !== undefined ? Math.min(Math.max(item.score, 0), 1) : Math.random();
-    const scale = 0.5 + (normalizedScore * 1.2); // Scale range 0.5 to 1.7 (More dramatic)
+    const visualWeight = clamp(item.visual_weight ?? item.relevance_score ?? 0.5, 0, 1);
+    const scale = 0.55 + (visualWeight * 1.15); // Scale range 0.55 to 1.7
 
     return {
         id: item.music_id,
@@ -80,17 +84,19 @@ function mapToCanvasAlbum(item: TagSearchResult): CanvasAlbum | null {
         x: 0,
         y: 0,
         rotation: 0,
-        scale
+        scale,
+        relevanceScore: item.relevance_score,
+        visualWeight: item.visual_weight,
+        cluster: item.cluster,
+        matchedTags: item.matched_tags,
+        explanations: item.explanations,
     };
 }
 
+// music_db_legal에 실제 시드된 Last.fm 무드 태그 (곡 연결 수 많은 순)
 const RECOMMENDED_TAGS = [
-    "action", "adventure", "advertising", "ambiental", "background", "ballad", "calm", "children", "christmas", "commercial",
-    "cool", "corporate", "dark", "deep", "documentary", "drama", "dramatic", "dream", "emotional", "energetic",
-    "epic", "fast", "film", "fun", "funny", "game", "groovy", "happy", "heavy", "holiday",
-    "hopeful", "horror", "inspiring", "love", "meditative", "melancholic", "mellow", "melodic", "motivational", "movie",
-    "nature", "party", "positive", "powerful", "relaxing", "retro", "romantic", "sad", "sexy", "slow",
-    "soft", "soundscape", "space", "sport", "summer", "trailer", "travel", "upbeat", "uplifting"
+    "sad", "chill", "happy", "mellow", "beautiful", "dark", "dreamy", "melancholic", "summer", "chillout",
+    "atmospheric", "emotional", "energetic", "romantic", "sexy", "upbeat", "easy listening", "melancholy", "relaxing"
 ];
 
 export default function InteractiveCanvasPage() {
@@ -219,11 +225,12 @@ export default function InteractiveCanvasPage() {
             currentTagsRef.current = tags;
             if (overrideQuery) setSearchQuery(overrideQuery);
 
-            // Fetch all results
-            const results = await searchByTags(tags, 120);
+            // Fetch GraphRAG results
+            const response = await searchCanvasGraphRag(tags, 120);
+            const results = response.items || [];
 
-            if (!results || results.length === 0) {
-                setSearchError("검색 결과가 없습니다. 다른 태그로 시도해보세요.");
+            if (response.status !== "ok" || results.length === 0) {
+                setSearchError(response.meta?.message || "검색 결과가 없습니다. 다른 태그로 시도해보세요.");
                 setIsLoading(false);
                 return;
             }
@@ -233,40 +240,7 @@ export default function InteractiveCanvasPage() {
                 .map(mapToCanvasAlbum)
                 .filter((a): a is CanvasAlbum => a !== null);
 
-            // "happy" 태그 검색 시 LISA의 MONEY를 맨 앞에 고정하고 특정 위치에 배치
-            const normalizedTags = tags.toLowerCase().split(',').map(t => t.trim());
-            let shuffled: CanvasAlbum[];
-            let lisaMoney: CanvasAlbum | null = null;
-
-            if (normalizedTags.includes('happy')) {
-                // LISA의 MONEY 찾기
-                const lisaMoneyIndex = canvasAlbums.findIndex(
-                    album => album.title?.toLowerCase().includes('money') &&
-                        album.artist?.toLowerCase().includes('lisa')
-                );
-
-                if (lisaMoneyIndex !== -1) {
-                    // LISA의 MONEY를 분리
-                    lisaMoney = canvasAlbums[lisaMoneyIndex];
-                    const others = canvasAlbums.filter((_, idx) => idx !== lisaMoneyIndex);
-                    // 나머지만 shuffle
-                    const shuffledOthers = others.sort(() => Math.random() - 0.5);
-                    // LISA의 MONEY는 따로 추가하므로 캐시에서는 제외
-                    shuffled = shuffledOthers;
-
-                    // LISA의 MONEY를 오른쪽으로 조금 이동한 위치에 배치
-                    lisaMoney.x = 2000; // 오른쪽으로 더 이동 (기존 1400 -> 2000)
-                    lisaMoney.y = 0; // 중앙 높이
-                    lisaMoney.rotation = (Math.random() - 0.5) * 15; // 약간의 회전
-                    lisaMoney.scale = Math.max(lisaMoney.scale, 1.2); // 크게 표시
-                } else {
-                    // LISA의 MONEY를 찾지 못한 경우 일반 shuffle
-                    shuffled = canvasAlbums.sort(() => Math.random() - 0.5);
-                }
-            } else {
-                // "happy" 태그가 아닌 경우 일반 shuffle
-                shuffled = canvasAlbums.sort(() => Math.random() - 0.5);
-            }
+            const shuffled = canvasAlbums.sort(() => Math.random() - 0.5);
 
             // Store in cache
             searchCacheRef.current = shuffled;
@@ -274,11 +248,6 @@ export default function InteractiveCanvasPage() {
             // Reset state
             setAlbums([]);
             loadedChunksRef.current.clear();
-
-            // "happy" 태그 검색 시 LISA의 MONEY를 먼저 표시
-            if (lisaMoney) {
-                setAlbums([lisaMoney]);
-            }
 
             // Load initial chunks
             for (let dx = -1; dx <= 1; dx++) {
