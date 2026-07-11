@@ -225,7 +225,10 @@ export default function AiCreatePage() {
 
     if (genTask.phase === "converting") {
       setDisplayText("프롬프트 변환 중....\n잠시 기다려 주세요");
-    } else if (genTask.convertedPrompt && genTask.phase === "generating") {
+    } else if (
+      genTask.convertedPrompt &&
+      (genTask.phase === "generating" || genTask.phase === "preparing_audio")
+    ) {
       setDisplayText(genTask.convertedPrompt);
     } else if (genTask.phase === "preparing_audio") {
       setDisplayText("오디오 준비 중....\n잠시만 기다려 주세요");

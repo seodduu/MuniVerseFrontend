@@ -8,7 +8,6 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import {
-  convertPromptOnly,
   generateMusicAsync,
   getActiveGeneration,
   getGenerationJob,
@@ -94,7 +93,7 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
         const job = await getGenerationJob(jobId);
         if (epoch.current !== myEpoch) return;
         setTask(jobToTask(job));
-        if (job.phase === "generating" || job.phase === "preparing_audio") {
+        if (job.phase !== "completed" && job.phase !== "failed") {
           pollOnce(jobId);
         }
       } catch {
@@ -117,7 +116,7 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
         if (cancelled || !job || epoch.current !== myEpoch) return;
         setTask(jobToTask(job));
         attempts.current = 0;
-        if (job.phase === "generating" || job.phase === "preparing_audio") {
+        if (job.phase !== "completed" && job.phase !== "failed") {
           pollOnce(job.job_id);
         }
       })
@@ -149,36 +148,15 @@ export function AIGenerationProvider({ children }: { children: ReactNode }) {
       });
 
       try {
-        // 1) 프롬프트 변환
-        const conv = await convertPromptOnly({
-          prompt: trimmed,
-          make_instrumental: params.makeInstrumental,
-        });
-        let converted = conv.converted_prompt;
-        try {
-          const parsed = JSON.parse(conv.converted_prompt);
-          converted = parsed?.prompt ?? conv.converted_prompt;
-        } catch {
-          /* 평문 프롬프트 */
-        }
-        if (epoch.current !== myEpoch) return;
-        setTask((prev) =>
-          prev ? { ...prev, convertedPrompt: converted } : prev
-        );
-
-        // 2) 생성 요청 → job_id
+        // 생성 요청 → job_id (서버가 내부적으로 프롬프트 변환까지 처리)
         const res = await generateMusicAsync({
-          prompt: converted,
+          prompt: trimmed, // RAW prompt — server converts internally
           user_id: userId,
           make_instrumental: params.makeInstrumental,
         });
 
         if (epoch.current !== myEpoch) return;
-        setTask((prev) =>
-          prev
-            ? { ...prev, jobId: res.job_id, phase: "generating", convertedPrompt: converted }
-            : prev
-        );
+        setTask((prev) => (prev ? { ...prev, jobId: res.job_id } : prev));
         attempts.current = 0;
         if (epoch.current !== myEpoch) return;
         pollOnce(res.job_id);
