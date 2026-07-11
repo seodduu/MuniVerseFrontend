@@ -7,10 +7,10 @@ import { usePlayer } from "../../player/PlayerContext";
 import type { PlayerTrack } from "../../player/PlayerContext";
 import type { AiTrack } from "../../mocks/aiSongMock";
 
-import { generateMusicAsync, getTaskStatus, convertPromptOnly } from "../../api/ai";
 import { listAllAiMusic, getMusicDetail } from "../../api/music";
 import { getBestAlbumCover } from "../../api/album";
 import { getCurrentUserId } from "../../utils/auth";
+import { useAIGeneration } from "../../contexts/AIGenerationContext";
 
 import { Typewriter } from "../../components/Typewriter/Typewriter";
 import { CursorStyle } from "../../components/Typewriter/types";
@@ -120,21 +120,24 @@ export default function AiCreatePage() {
   const promptCardRef = useRef<HTMLDivElement | null>(null);
 
   const [makeInstrumental, setMakeInstrumental] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [isCompleted, setIsCompleted] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const [convertedPrompt, setConvertedPrompt] = useState<string>("");
   const [displayText, setDisplayText] = useState<string>("");
   const [typewriterTrigger, setTypewriterTrigger] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
+
+  // ✅ 전역 AI 생성 컨텍스트 — 생성/폴링/완료 처리를 전부 위임
+  const { task: genTask, isActive: genActive, startGeneration } = useAIGeneration();
+  const genBusy = genActive || genTask?.phase === "converting";
+  const genCompleted = genTask?.phase === "completed";
+  const genConverted = genTask?.convertedPrompt ?? "";
+  const genError = genTask?.phase === "failed" ? genTask?.error ?? null : null;
 
   useEffect(() => {
     const incoming = sp.get("prompt");
     if (!incoming) return;
 
     // 생성 중/완료 중이면 덮어쓰기 방지
-    if (isGenerating || isCompleted) return;
+    if (genBusy || genCompleted) return;
 
     // 한번만 적용 (사용자가 수정하는 거 덮어쓰면 안 됨)
     if (appliedRef.current) return;
@@ -153,7 +156,7 @@ export default function AiCreatePage() {
     // URL 깔끔하게 정리 (선택이지만 강추)
     sp.delete("prompt");
     setSp(sp, { replace: true });
-  }, [sp, setSp, isGenerating, isCompleted, maxPrompt]);
+  }, [sp, setSp, genBusy, genCompleted, maxPrompt]);
 
   useEffect(() => {
     const scroller = backScrollRef.current;
@@ -197,13 +200,13 @@ export default function AiCreatePage() {
 
   // 사용자가 입력을 변경할 때 (변환 결과가 없을 때만 사용자 입력 표시)
   useEffect(() => {
-    if (isGenerating) return;
+    if (genBusy) return;
 
     // 변환 결과가 있으면 유지
-    if (convertedPrompt) return;
+    if (genConverted) return;
 
     // 생성 완료 상태일 때는 카드를 뒤집지 않음
-    if (isCompleted) return;
+    if (genCompleted) return;
 
     // 변환 결과가 없을 때 카드를 앞면으로
     setIsFlipped(false);
@@ -211,7 +214,31 @@ export default function AiCreatePage() {
     // 변환 결과가 없을 때만 사용자 입력 표시
     if (prompt) setDisplayText(prompt);
     else setDisplayText("");
-  }, [prompt, isGenerating, convertedPrompt, isCompleted]);
+  }, [prompt, genBusy, genConverted, genCompleted]);
+
+  // ✅ 전역 생성 작업(genTask)의 단계 변화를 카드 뒷면 문구에 동기화
+  useEffect(() => {
+    if (!genTask) return;
+
+    // 컨텍스트에 진행 중/완료된 작업이 있으면 카드를 뒷면으로
+    setIsFlipped(true);
+
+    if (genTask.phase === "converting") {
+      setDisplayText("프롬프트 변환 중....\n잠시 기다려 주세요");
+    } else if (
+      genTask.convertedPrompt &&
+      (genTask.phase === "generating" || genTask.phase === "preparing_audio")
+    ) {
+      setDisplayText(genTask.convertedPrompt);
+    } else if (genTask.phase === "preparing_audio") {
+      setDisplayText("오디오 준비 중....\n잠시만 기다려 주세요");
+    } else if (genTask.phase === "completed") {
+      setDisplayText("생성이 완료되었습니다.\n우측 하단 알림에서 확인하세요.");
+    } else if (genTask.phase === "failed") {
+      setDisplayText(genTask.error ?? "생성에 실패했습니다.");
+    }
+    setTypewriterTrigger((prev) => prev + 1);
+  }, [genTask?.phase, genTask?.convertedPrompt, genTask?.error]);
 
   // Typewriter 설정
   const typewriterConfig = {
@@ -391,7 +418,7 @@ export default function AiCreatePage() {
    ========================= */
   const handleCreateSong = async () => {
     const trimmed = prompt.trim();
-    if (!trimmed || isGenerating) return;
+    if (!trimmed || genActive) return;
 
     const userId = getCurrentUserId();
     if (userId === null) {
@@ -400,161 +427,12 @@ export default function AiCreatePage() {
       return;
     }
 
-    try {
-      setIsGenerating(true);
-      setIsCompleted(false);
-      setErrorMessage(null);
-      setConvertedPrompt("");
+    // 전역 컨텍스트에 위임 — 페이지를 벗어나도 우하단 토스트가 진행도를 추적
+    setIsFlipped(true);
+    setDisplayText("프롬프트 변환 중....\n잠시 기다려 주세요");
+    setTypewriterTrigger((prev) => prev + 1);
 
-      // ✅ 카드 뒷면으로 플립 + 로딩 텍스트 애니메이션
-      setIsFlipped(true);
-      setDisplayText("프롬프트 변환 중....\n잠시 기다려 주세요");
-      setTypewriterTrigger((prev) => prev + 1);
-
-      // 1) 프롬프트 변환
-      const convertResponse = await convertPromptOnly({
-        prompt: trimmed,
-        make_instrumental: makeInstrumental,
-      });
-
-      // 변환된 프롬프트 파싱
-      let finalConvertedPrompt = "";
-      try {
-        const parsed = JSON.parse(convertResponse.converted_prompt);
-        finalConvertedPrompt = parsed?.prompt ? parsed.prompt : convertResponse.converted_prompt;
-      } catch {
-        finalConvertedPrompt = convertResponse.converted_prompt;
-      }
-
-      // 6초 대기 후 변환된 프롬프트를 카드에 표시
-      await new Promise((resolve) => setTimeout(resolve, 6000));
-      setConvertedPrompt(finalConvertedPrompt);
-      setDisplayText(finalConvertedPrompt);
-      setTypewriterTrigger((prev) => prev + 1);
-
-      // 2) 음악 생성 요청
-      const response = await generateMusicAsync({
-        prompt: finalConvertedPrompt,
-        user_id: userId,
-        make_instrumental: makeInstrumental,
-      });
-
-      // 3) 작업 상태 폴링
-      const pollTaskStatus = async (taskId: string) => {
-        const maxAttempts = 120;
-        let attempts = 0;
-
-        const poll = async (): Promise<void> => {
-          if (attempts >= maxAttempts) {
-            setErrorMessage("음악 생성 시간이 초과되었습니다. 나중에 다시 확인해주세요.");
-            setIsGenerating(false);
-            return;
-          }
-
-          try {
-            const status = await getTaskStatus(taskId);
-
-            if (status.status === "SUCCESS" && status.result) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const result: any = status.result as any;
-              const musicIdFromResult = result?.music?.music_id ?? result?.music_id ?? null;
-
-              if (!musicIdFromResult) {
-                setPrompt("");
-                setConvertedPrompt("");
-                setSelected(new Set());
-                setDisplayText("생성이 완료되었습니다.\n생성곡 목록으로 넘어갑니다.");
-                setTypewriterTrigger((prev) => prev + 1);
-                setIsGenerating(false);
-                setIsCompleted(true);
-
-                setTimeout(() => navigate("/my/ai-songs"), 5000);
-                return;
-              }
-
-              const musicId = musicIdFromResult as number;
-
-              // ✅ 상세 폴링: audio_url 준비될 때까지
-              const pollDetailMaxAttempts = 120;
-              let detailAttempts = 0;
-
-              const pollMusicDetail = async (): Promise<void> => {
-                if (detailAttempts >= pollDetailMaxAttempts) {
-                  setIsGenerating(false);
-                  setDisplayText(
-                    "AI 노래 생성은 완료되었지만,\n오디오 파일 준비에 시간이 더 걸리고 있습니다.\n나의 AI 생성곡 페이지에서 잠시 후 다시 확인해 주세요."
-                  );
-                  setTypewriterTrigger((prev) => prev + 1);
-                  setTimeout(() => navigate("/my/ai-songs"), 5000);
-                  return;
-                }
-
-                try {
-                  const data = await getMusicDetail(musicId);
-
-                  if (!data) {
-                    detailAttempts++;
-                    setTimeout(pollMusicDetail, 5000);
-                    return;
-                  }
-
-                  const detailAudioUrl = data.audio_url ?? null;
-
-                  if (!detailAudioUrl) {
-                    detailAttempts++;
-                    setTimeout(pollMusicDetail, 5000);
-                    return;
-                  }
-
-                  setPrompt("");
-                  setConvertedPrompt("");
-                  setSelected(new Set());
-
-                  setDisplayText("생성이 완료되었습니다.\n생성곡 목록으로 넘어갑니다.");
-                  setTypewriterTrigger((prev) => prev + 1);
-                  setIsGenerating(false);
-                  setIsCompleted(true);
-
-                  setTimeout(() => navigate("/my/ai-songs"), 5000);
-                } catch {
-                  detailAttempts++;
-                  setTimeout(pollMusicDetail, 5000);
-                }
-              };
-
-              pollMusicDetail();
-              return;
-            }
-
-            if (status.status === "FAILURE") {
-              setErrorMessage(status.error || "음악 생성에 실패했습니다. 다시 시도해주세요.");
-              setIsGenerating(false);
-              return;
-            }
-
-            attempts++;
-            setTimeout(poll, 5000);
-          } catch {
-            attempts++;
-            setTimeout(poll, 5000);
-          }
-        };
-
-        poll();
-      };
-
-      pollTaskStatus(response.task_id);
-    } catch (error: unknown) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const err: any = error as any;
-      const errorMsg =
-        err?.response?.data?.error ||
-        err?.response?.data?.details ||
-        err?.message ||
-        "AI 노래 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.";
-      setErrorMessage(errorMsg);
-      setIsGenerating(false);
-    }
+    await startGeneration({ prompt: trimmed, makeInstrumental });
   };
 
   /** =========================
@@ -804,7 +682,7 @@ export default function AiCreatePage() {
                         pointerEvents: "auto",
                       } as CSSProperties
                     }
-                    disabled={isGenerating}
+                    disabled={genBusy}
                   />
 
                   {/* 글자 수 표시 */}
@@ -827,14 +705,14 @@ export default function AiCreatePage() {
               >
                 <div className="relative flex flex-col items-center justify-center h-full min-h-0">
                   <div className="absolute top-0 left-0 text-[10px] font-black tracking-[0.2em] text-white/30 uppercase">
-                    {isGenerating && !convertedPrompt ? "Processing..." : convertedPrompt ? "Enhanced Result" : ""}
+                    {genBusy && !genConverted ? "Processing..." : genConverted ? "Enhanced Result" : ""}
                   </div>
 
                   <div
                     ref={backScrollRef}
                     className={[
                       "relative w-full flex flex-col min-h-[250px] max-h-[250px] overflow-y-auto px-4 no-scrollbar",
-                      isGenerating && !convertedPrompt
+                      genBusy && !genConverted
                         ? "items-center justify-center text-center"
                         : "items-center justify-start pt-[20px]",
                     ].join(" ")}
@@ -851,7 +729,7 @@ export default function AiCreatePage() {
                       </div>
                     ) : (
                       <div className="text-[#AFDEE2]/20 text-2xl font-black uppercase tracking-tighter text-center">
-                        {isGenerating ? "Creating..." : "Result will appear here"}
+                        {genBusy ? "Creating..." : "Result will appear here"}
                       </div>
                     )}
                   </div>
@@ -867,7 +745,7 @@ export default function AiCreatePage() {
               type="checkbox"
               checked={makeInstrumental}
               onChange={(e) => setMakeInstrumental(e.target.checked)}
-              disabled={isGenerating}
+              disabled={genBusy}
               className="accent-[#f6f6f6] w-4 h-4 cursor-pointer disabled:cursor-not-allowed"
             />
             <span>보컬 없이 연주곡(Instrumental)으로 만들기</span>
@@ -877,7 +755,7 @@ export default function AiCreatePage() {
           <div className="mt-8 mb-10 flex flex-col items-center gap-4">
             <button
               type="button"
-              disabled={!prompt.trim() || isGenerating}
+              disabled={!prompt.trim() || genBusy}
               onClick={handleCreateSong}
               className="
                 px-10 py-4
@@ -898,7 +776,7 @@ export default function AiCreatePage() {
                 disabled:active:scale-100"
             >
               <div className="flex gap-3 items-center">
-                {isGenerating ? (
+                {genBusy ? (
                   <span className="inline-flex h-5 w-5 items-center justify-center" aria-hidden="true">
                     <span className="h-5 w-5 rounded-full border-2 border-[#1d1d1d]/30 border-t-[#1d1d1d] animate-spin" />
                   </span>
@@ -906,12 +784,12 @@ export default function AiCreatePage() {
                   <MdMusicNote size={22} />
                 )}
                 <span className="whitespace-nowrap">
-                  {isGenerating ? "AI 노래 생성 중..." : isCompleted ? "생성 완료" : "AI 노래 생성하기"}
+                  {genBusy ? "AI 노래 생성 중..." : genCompleted ? "생성 완료" : "AI 노래 생성하기"}
                 </span>
               </div>
             </button>
 
-            {errorMessage && <p className="text-center text-[11px] font-bold text-red-400/80 max-w-[300px] uppercase tracking-tight">{errorMessage}</p>}
+            {genError && <p className="text-center text-[11px] font-bold text-red-400/80 max-w-[300px] uppercase tracking-tight">{genError}</p>}
           </div>
         </section>
 

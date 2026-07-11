@@ -58,6 +58,8 @@ const InteractiveCanvasPage = lazy(() => import("./pages/experimental/Interactiv
 import { PlayerProvider } from "./player/PlayerContext";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { PlaylistProvider } from "./contexts/PlaylistContext";
+import { AIGenerationProvider } from "./contexts/AIGenerationContext";
+import AIGenerationToast from "./components/common/AIGenerationToast";
 
 function AuthFallback() {
   return (
@@ -90,7 +92,8 @@ export default function App() {
       <ToastProvider>
         <PlaylistProvider>
           <EasterEggProvider>
-            <Routes>
+            <AIGenerationProvider>
+              <Routes>
               {/* ✅ Experimental Canvas Route (No Layout) */}
               <Route path="/canvas" element={<Suspense fallback={<PageLoader />}><InteractiveCanvasPage /></Suspense>} />
 
@@ -177,6 +180,8 @@ export default function App() {
 
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+              <AIGenerationToast />
+            </AIGenerationProvider>
           </EasterEggProvider>
         </PlaylistProvider>
       </ToastProvider>

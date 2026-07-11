@@ -15,6 +15,7 @@ export interface GenerateMusicRequest {
  */
 export interface GenerateMusicAsyncResponse {
   task_id: string;
+  job_id: number;
   status: string;
   message: string;
   converted_prompt?: string; // 라마에서 변환된 프롬프트
@@ -105,5 +106,45 @@ export async function convertPromptOnly(
     payload
   );
   console.log("[API] 라마 프롬프트 변환 응답:", res.data);
+  return res.data;
+}
+
+export type GenerationPhase =
+  | "generating"
+  | "preparing_audio"
+  | "completed"
+  | "failed";
+
+export interface GenerationJobResponse {
+  job_id: number;
+  phase: GenerationPhase;
+  music_id: number | null;
+  audio_url: string | null;
+  original_prompt: string;
+  converted_prompt: string | null;
+  error: string | null;
+}
+
+/**
+ * 현재 로그인 유저의 활성 생성 작업 조회 (없으면 null)
+ * GET /api/v1/music/generation/active/
+ */
+export async function getActiveGeneration(): Promise<GenerationJobResponse | null> {
+  const res = await axiosInstance.get<GenerationJobResponse | null>(
+    "/generation/active/"
+  );
+  return res.data ?? null;
+}
+
+/**
+ * 생성 작업 상세 조회 (폴링용)
+ * GET /api/v1/music/generation/{job_id}/
+ */
+export async function getGenerationJob(
+  jobId: number
+): Promise<GenerationJobResponse> {
+  const res = await axiosInstance.get<GenerationJobResponse>(
+    `/generation/${jobId}/`
+  );
   return res.data;
 }
