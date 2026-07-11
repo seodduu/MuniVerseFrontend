@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CanvasAlbum } from "../../api/music";
+import { resolveMediaUrl } from "../../utils/mediaUrl";
 
 interface MusicPlayerBarProps {
     album: CanvasAlbum;
@@ -36,7 +37,7 @@ export default function MusicPlayerBar({ album, audioUrl }: MusicPlayerBarProps)
         <div className="fixed bottom-0 left-[30%] -translate-x-1/2 z-[200] flex justify-center pb-12 pointer-events-none transition-all duration-500">
             <audio
                 ref={audioRef}
-                src={audioUrl}
+                src={resolveMediaUrl(audioUrl)}
                 onTimeUpdate={handleTimeUpdate}
                 onEnded={() => setIsPlaying(false)}
             />
