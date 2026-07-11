@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { logPlayTrack, playTrack } from "../api/music";
 import { isLoggedIn } from "../api/auth";
+import { resolveMediaUrl } from "../utils/mediaUrl";
 
 export type PlayerTrack = {
   id: string;
@@ -313,7 +314,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
       // URL이 "/audio/sample.mp3" 같거나 비어있는데, musicId가 있으면 실제 URL을 가져옴
       const isPlaceholder = url === "/audio/sample.mp3" || !url;
-      if (isPlaceholder && current.musicId) {
+      // Deezer 프리뷰 URL(dzcdn.net)은 ~15분 후 만료되므로, 목록/검색 응답에 담겨온 URL이라도
+      // 재생 시점에는 항상 최신 URL을 다시 받아온다.
+      const isExpiringDeezerUrl = url.includes("dzcdn.net");
+      if ((isPlaceholder || isExpiringDeezerUrl) && current.musicId) {
         try {
           const realUrl = await playTrack(current.musicId);
           if (realUrl) {
@@ -344,9 +348,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const resolved = resolveMediaUrl(url);
       // URL이 변경되었을 때만 src 교체 (재생 중 끊김 방지)
-      if (a.src !== url && a.src !== new URL(url, window.location.href).href) {
-        a.src = url;
+      if (a.src !== resolved && a.src !== new URL(resolved, window.location.href).href) {
+        a.src = resolved;
         a.load();
       }
 
