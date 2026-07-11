@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import InfiniteCanvas from "../../components/canvas/InfiniteCanvas";
 import AlbumDetailOverlay from "../../components/canvas/AlbumDetailOverlay";
 import MusicPlayerBar from "../../components/canvas/MusicPlayerBar";
-import { searchCanvasGraphRag, getCanvasAlbums, playTrack, type CanvasAlbum, type CanvasGraphRagItem } from "../../api/music";
+import { searchCanvasGraphRag, askCanvas, getCanvasAnswer, getCanvasAlbums, playTrack, type CanvasAlbum, type CanvasGraphRagItem } from "../../api/music";
 
 const CHUNK_SIZE = 1200; // Larger chunks for more spread
 const MAX_CHUNK_DIST = 2;
@@ -109,11 +109,24 @@ export default function InteractiveCanvasPage() {
     const [isLoading, setIsLoading] = useState(false);
     const [searchError, setSearchError] = useState<string | null>(null); // 에러 메시지 상태 추가
 
+    // 자연어 질의(/canvas/ask) 관련 상태
+    const [extractedTags, setExtractedTags] = useState<string[]>([]);
+    const [interpretationSource, setInterpretationSource] = useState<"llm" | "fallback_direct" | null>(null);
+    const [isInterpreting, setIsInterpreting] = useState(false); // "질문을 해석하는 중…" 스피너
+    const [isGeneratingAnswer, setIsGeneratingAnswer] = useState(false); // 태그 해석 완료 후 "답변을 생성하는 중…" 단계 안내
+    const [answer, setAnswer] = useState<string | null>(null);
+    const [showNoMatchHint, setShowNoMatchHint] = useState(false); // extracted_tags가 빈 배열일 때
+
     // Cache for search results
     const searchCacheRef = useRef<CanvasAlbum[]>([]);
     const loadedChunksRef = useRef<Set<string>>(new Set());
     const currentTagsRef = useRef<string>("");
     const initialLoadDoneRef = useRef(false);
+
+    // 요청 시퀀스 가드: 새 검색/답변 사이클마다 증가시키고, 비동기 완료 시점에
+    // 시퀀스가 여전히 최신인지 확인해서 늦게 도착한 이전 요청이 최신 상태를 덮어쓰지 않도록 한다.
+    // (언마운트 이후에도 시퀀스가 갱신되지 않으므로 언마운트 후 setState도 함께 방지된다)
+    const requestSeqRef = useRef(0);
 
     // Initial load: random albums for background behind overlay
     useEffect(() => {
@@ -209,6 +222,59 @@ export default function InteractiveCanvasPage() {
         }
     }, [loadChunkFromCache]);
 
+    // items(CanvasGraphRagItem[])를 캔버스에 렌더링하는 공통 로직.
+    // /graphrag 경로와 /ask 경로(태그 추출 성공 시) 모두에서 재사용한다.
+    const populateCanvasFromItems = useCallback((items: CanvasGraphRagItem[]) => {
+        const canvasAlbums = items
+            .map(mapToCanvasAlbum)
+            .filter((a): a is CanvasAlbum => a !== null);
+
+        const shuffled = canvasAlbums.sort(() => Math.random() - 0.5);
+
+        // Store in cache
+        searchCacheRef.current = shuffled;
+
+        // Reset state
+        setAlbums([]);
+        loadedChunksRef.current.clear();
+
+        // Load initial chunks
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                loadChunkFromCache(dx, dy);
+            }
+        }
+
+        setShowOverlay(false);
+    }, [loadChunkFromCache]);
+
+    // 기존 /canvas/graphrag 태그 검색 경로. 최초 검색과 태그 칩 편집(재검색) 모두에서 사용한다.
+    const runGraphRagSearch = useCallback(async (tagsCsv: string) => {
+        currentTagsRef.current = tagsCsv;
+
+        const response = await searchCanvasGraphRag(tagsCsv, 120);
+        const results = response.items || [];
+
+        if (response.status !== "ok" || results.length === 0) {
+            setSearchError(response.meta?.message || "검색 결과가 없습니다. 다른 태그로 시도해보세요.");
+            return;
+        }
+
+        populateCanvasFromItems(results);
+    }, [populateCanvasFromItems]);
+
+    // 쉼표로 구분된 짧은 태그 리스트인지 판별하는 라우팅 휴리스틱.
+    // 규칙: 쉼표 기준으로 split한 뒤 trim/빈 문자열 제거한 토큰이 1개 이상 존재하고,
+    //       모든 토큰에 공백이 없으면 "태그 리스트"로 간주해 기존 /graphrag 경로로 보낸다.
+    //       하나라도 공백을 포함한 토큰이 있으면(자연어 문장 등) /ask 경로로 보낸다.
+    // 이 규칙은 RECOMMENDED_TAGS 버튼 클릭(단일 태그, 쉼표 없음, 공백 없음)도 기존과
+    // 동일하게 /graphrag로 유지시켜준다.
+    function isTagListQuery(q: string): boolean {
+        const tokens = q.split(',').map(t => t.trim()).filter(Boolean);
+        if (tokens.length === 0) return false;
+        return tokens.every(t => !/\s/.test(t) && t.length <= 20);
+    }
+
     // Handle search submission
     const handleSearch = async (e?: React.FormEvent, overrideQuery?: string) => {
         if (e) e.preventDefault();
@@ -216,52 +282,139 @@ export default function InteractiveCanvasPage() {
         const q = overrideQuery || searchQuery;
         if (!q.trim()) return;
 
+        if (overrideQuery) setSearchQuery(overrideQuery);
+
+        if (isTagListQuery(q)) {
+            // 기존 태그 리스트 경로 (변경 없음)
+            const seq = ++requestSeqRef.current;
+            setIsLoading(true);
+            setSearchError(null);
+            setAnswer(null);
+            setShowNoMatchHint(false);
+            setExtractedTags([]);
+            setInterpretationSource(null);
+
+            try {
+                const tags = q.split(',').map(t => t.trim()).filter(Boolean).join(',');
+                await runGraphRagSearch(tags);
+            } catch (error) {
+                if (requestSeqRef.current === seq) {
+                    console.error("Search failed:", error);
+                    setSearchError("검색 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+                }
+            } finally {
+                if (requestSeqRef.current === seq) setIsLoading(false);
+            }
+            return;
+        }
+
+        // 자연어 질의 경로: /canvas/ask 로 태그를 해석한 뒤, /canvas/answer 로 자연어 답변까지
+        // 만들어질 때까지 기다렸다가 캔버스 + 태그 칩 + 답변 패널을 한 번에 공개한다.
+        // (답변이 늦게 와도 캔버스가 먼저 열려버리면 "빈 캔버스만 보이는" 어색한 순간이 생기므로,
+        //  답변 생성까지 하나의 사이클로 묶는다. 단, 답변 생성이 무한정 캔버스를 막지 않도록
+        //  아래에서 타임아웃으로 안전장치를 둔다.)
+        const seq = ++requestSeqRef.current;
         setIsLoading(true);
-        setSearchError(null); // 에러 초기화
+        setIsInterpreting(true);
+        setSearchError(null);
+        setAnswer(null);
+        setShowNoMatchHint(false);
 
         try {
-            // Parse tags (comma-separated)
-            const tags = q.split(',').map(t => t.trim()).filter(Boolean).join(',');
-            currentTagsRef.current = tags;
-            if (overrideQuery) setSearchQuery(overrideQuery);
+            const response = await askCanvas(q);
+            if (requestSeqRef.current !== seq) return; // 더 최신 요청이 진행 중이면 무시
 
-            // Fetch GraphRAG results
-            const response = await searchCanvasGraphRag(tags, 120);
-            const results = response.items || [];
+            const tags = response.interpretation?.extracted_tags ?? [];
+            const source = response.interpretation?.source ?? null;
 
-            if (response.status !== "ok" || results.length === 0) {
-                setSearchError(response.meta?.message || "검색 결과가 없습니다. 다른 태그로 시도해보세요.");
+            if (tags.length === 0) {
+                // 질문을 이해하지 못한 경우: 캔버스는 그대로 두고 힌트만 노출, /answer 호출 안 함
+                setExtractedTags(tags);
+                setInterpretationSource(source);
+                setShowNoMatchHint(true);
+                setIsInterpreting(false);
                 setIsLoading(false);
                 return;
             }
 
-            // Convert to CanvasAlbum format
-            const canvasAlbums = results
-                .map(mapToCanvasAlbum)
-                .filter((a): a is CanvasAlbum => a !== null);
+            currentTagsRef.current = tags.join(',');
 
-            const shuffled = canvasAlbums.sort(() => Math.random() - 0.5);
-
-            // Store in cache
-            searchCacheRef.current = shuffled;
-
-            // Reset state
-            setAlbums([]);
-            loadedChunksRef.current.clear();
-
-            // Load initial chunks
-            for (let dx = -1; dx <= 1; dx++) {
-                for (let dy = -1; dy <= 1; dy++) {
-                    loadChunkFromCache(dx, dy);
-                }
+            const results = response.items || [];
+            if (response.status !== "ok" || results.length === 0) {
+                // 검색 결과가 없으면 캔버스를 공개할 것이 없으므로 여기서 종료, /answer 호출 안 함
+                setSearchError(response.meta?.message || "검색 결과가 없습니다. 다른 태그로 시도해보세요.");
+                setIsInterpreting(false);
+                setIsLoading(false);
+                return;
             }
 
-            setShowOverlay(false);
-        } catch (error) {
-            console.error("Search failed:", error);
-            setSearchError("검색 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
-        } finally {
+            // 태그 해석은 끝났지만 답변 생성이 남아있으므로 오버레이 안내 문구를 다음 단계로 전환한다.
+            setIsGeneratingAnswer(true);
+
+            // /canvas/answer 는 캔버스 공개와 동시에 보여줄 답변을 만드는 단계라 await로 기다린다.
+            // 다만 답변 생성이 캔버스 공개를 무한정 막으면 안 되므로 30초 타임아웃을 두고,
+            // 타임아웃되면 답변 없이(answer=null) 캔버스+칩만 공개한다.
+            const ANSWER_TIMEOUT_MS = 30000;
+            let answerText: string | null = null;
+            try {
+                answerText = await Promise.race([
+                    getCanvasAnswer(q, tags).then((answerRes) => answerRes.answer ?? null),
+                    new Promise<null>((resolve) => setTimeout(() => resolve(null), ANSWER_TIMEOUT_MS)),
+                ]);
+            } catch (error) {
+                console.error("[Canvas] getCanvasAnswer 실패", error);
+                answerText = null;
+            }
+
+            if (requestSeqRef.current !== seq) return; // 늦게 도착한 이전 요청 결과 무시
+
+            // 캔버스 + 태그 칩 + 답변을 한 시점에 함께 공개한다.
+            setExtractedTags(tags);
+            setInterpretationSource(source);
+            populateCanvasFromItems(results);
+            setAnswer(answerText);
+
+            setIsInterpreting(false);
+            setIsGeneratingAnswer(false);
             setIsLoading(false);
+        } catch (error) {
+            if (requestSeqRef.current === seq) {
+                console.error("Ask failed:", error);
+                setSearchError("질문을 해석하는 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+                setIsInterpreting(false);
+                setIsGeneratingAnswer(false);
+                setIsLoading(false);
+            }
+        }
+    };
+
+    // 태그 칩 제거: 남은 태그로 기존 /graphrag 경로로 재검색한다.
+    // /answer는 다시 호출하지 않는다 (칩 편집은 태그 미세조정 목적이라 이전 답변을 유지해도
+    // 무방하다고 판단했지만, 답변이 더 이상 최신 태그와 맞지 않을 수 있으므로 안전하게 숨긴다).
+    const handleRemoveTag = async (tagToRemove: string) => {
+        const remaining = extractedTags.filter(t => t !== tagToRemove);
+
+        const seq = ++requestSeqRef.current;
+        setAnswer(null);
+        setSearchError(null);
+        setExtractedTags(remaining);
+
+        if (remaining.length === 0) {
+            setShowNoMatchHint(true);
+            return;
+        }
+
+        setShowNoMatchHint(false);
+        setIsLoading(true);
+        try {
+            await runGraphRagSearch(remaining.join(','));
+        } catch (error) {
+            if (requestSeqRef.current === seq) {
+                console.error("Tag removal search failed:", error);
+                setSearchError("검색 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+            }
+        } finally {
+            if (requestSeqRef.current === seq) setIsLoading(false);
         }
     };
 
@@ -337,7 +490,7 @@ export default function InteractiveCanvasPage() {
                                 Music Verse
                             </h2>
                             <p className="text-black/50 text-sm text-center mb-8 font-medium">
-                                감성적인 태그로 나만의 음악 우주를 탐험하세요
+                                감성적인 태그로, 또는 자연스러운 문장으로 나만의 음악 우주를 탐험하세요
                             </p>
 
                             {/* Search Input */}
@@ -346,7 +499,7 @@ export default function InteractiveCanvasPage() {
                                     type="text"
                                     value={searchQuery}
                                     onChange={(e) => setSearchQuery(e.target.value)}
-                                    placeholder="무드나 장르를 입력하세요 (예: summer, dream)"
+                                    placeholder="예: summer, dream 또는 비 오는 날 운전할 때 들을 노래"
                                     className="w-full bg-black/[0.03] border border-black/5 rounded-2xl pl-6 pr-14 py-4 text-black placeholder-black/30 focus:outline-none focus:bg-white focus:border-black/10 focus:shadow-lg transition-all text-lg font-medium"
                                     disabled={isLoading}
                                 />
@@ -364,6 +517,20 @@ export default function InteractiveCanvasPage() {
                                     )}
                                 </button>
                             </div>
+
+                            {/* 질문 해석 중 / 답변 생성 중 안내 (자연어 질의 한 사이클 동안 단계별로 문구 전환) */}
+                            {(isInterpreting || isGeneratingAnswer) && (
+                                <div className="mt-4 p-3 rounded-xl bg-black/[0.03] text-black/60 text-center text-sm font-medium animate-fadeIn">
+                                    {isGeneratingAnswer ? "답변을 생성하는 중…" : "질문을 해석하는 중…"}
+                                </div>
+                            )}
+
+                            {/* 질문을 이해하지 못한 경우 안내 */}
+                            {showNoMatchHint && (
+                                <div className="mt-4 p-3 rounded-xl bg-amber-50 text-amber-700 text-center text-sm font-medium animate-fadeIn">
+                                    질문을 이해하지 못했어요. 아래 추천 태그로 시도해보세요.
+                                </div>
+                            )}
 
                             {/* Error Message */}
                             {searchError && (
@@ -399,13 +566,63 @@ export default function InteractiveCanvasPage() {
             {/* Header (shown when overlay is hidden) */}
             {!showOverlay && (
                 <>
-                    <div className="fixed top-8 left-8 z-40 pointer-events-none">
-                        <h1 className="text-5xl font-bold text-black tracking-tighter shadow-sm">
+                    <div className="fixed top-8 left-8 z-40">
+                        <h1 className="text-5xl font-bold text-black tracking-tighter shadow-sm pointer-events-none">
                             Music Verse
                         </h1>
-                        <p className="text-sm text-black/60 mt-1 font-medium">
-                            #{currentTagsRef.current.replace(/,/g, ' #')}
-                        </p>
+                        {extractedTags.length === 0 && (
+                            <p className="text-sm text-black/60 mt-1 font-medium pointer-events-none">
+                                #{currentTagsRef.current.replace(/,/g, ' #')}
+                            </p>
+                        )}
+
+                        {/* 자연어 질의로 해석된 태그 칩 (편집/제거 가능) */}
+                        {extractedTags.length > 0 && (
+                            <div className="mt-3 flex flex-wrap gap-2 max-w-md pointer-events-auto">
+                                {extractedTags.map((tag) => (
+                                    <span
+                                        key={tag}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/70 backdrop-blur-xl border border-white/20 shadow-[0_8px_20px_rgba(0,0,0,0.08)] text-sm text-black/70 font-medium"
+                                    >
+                                        #{tag}
+                                        <button
+                                            type="button"
+                                            onClick={() => handleRemoveTag(tag)}
+                                            className="w-4 h-4 flex items-center justify-center rounded-full hover:bg-black/10 text-black/40 hover:text-black/70 transition-colors"
+                                            aria-label={`${tag} 태그 제거`}
+                                        >
+                                            ×
+                                        </button>
+                                    </span>
+                                ))}
+                                {interpretationSource === "fallback_direct" && (
+                                    <span className="inline-flex items-center px-2 py-1 text-[11px] text-black/30 font-medium">
+                                        (직접 매칭)
+                                    </span>
+                                )}
+                            </div>
+                        )}
+
+                        {/* 질문을 이해하지 못한 경우: 추천 태그 힌트 */}
+                        {showNoMatchHint && (
+                            <div className="mt-3 max-w-md pointer-events-auto">
+                                <p className="text-sm text-amber-700 font-medium mb-2">
+                                    질문을 이해하지 못했어요. 추천 태그로 시도해보세요.
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                    {RECOMMENDED_TAGS.slice(0, 8).map((tag) => (
+                                        <button
+                                            key={tag}
+                                            type="button"
+                                            onClick={() => handleSearch(undefined, tag)}
+                                            className="px-3 py-1 rounded-full bg-white/70 backdrop-blur-xl border border-white/20 hover:bg-white/90 text-xs text-black/60 font-medium transition-all"
+                                        >
+                                            #{tag}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     {/* Persistent Search Bar (Top Center) */}
@@ -444,6 +661,27 @@ export default function InteractiveCanvasPage() {
                     Home
                 </button>
             </div>
+
+            {/* 자연어 질의 답변 패널 (하단 고정, 캔버스를 가리지 않도록 bottom에만 배치)
+                캔버스는 답변 생성이 끝난 시점에만 공개되므로, 이 패널이 보일 때는 answer가
+                이미 채워져 있거나(정상) 타임아웃으로 인해 아예 렌더링되지 않는다(안전장치). */}
+            <AnimatePresence>
+                {!showOverlay && extractedTags.length > 0 && answer && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 20 }}
+                        transition={{ duration: 0.3 }}
+                        className="fixed bottom-8 left-1/2 -translate-x-1/2 z-40 w-full max-w-xl px-4 pointer-events-none"
+                    >
+                        <div className="pointer-events-auto bg-white/70 backdrop-blur-2xl border border-white/20 rounded-3xl px-6 py-4 shadow-[0_20px_50px_rgba(0,0,0,0.15)]">
+                            <p className="text-sm text-black/80 font-medium leading-relaxed">
+                                {answer}
+                            </p>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </motion.div>
     );
 }

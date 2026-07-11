@@ -355,6 +355,12 @@ export interface CanvasGraphRagItem {
   explanations?: CanvasGraphRagExplanation[];
 }
 
+export interface CanvasInterpretation {
+  original_query: string;
+  extracted_tags: string[];
+  source: "llm" | "fallback_direct";
+}
+
 export interface CanvasGraphRagResponse {
   status: "ok" | "empty_data" | "no_query_match" | "no_results" | string;
   query: {
@@ -370,6 +376,8 @@ export interface CanvasGraphRagResponse {
     total_candidates?: number;
     graph_version?: string;
   };
+  // /canvas/ask 응답에만 포함됨 (/canvas/graphrag 에는 없음)
+  interpretation?: CanvasInterpretation;
 }
 
 export async function searchCanvasGraphRag(tags: string, limit: number = 120): Promise<CanvasGraphRagResponse> {
@@ -398,6 +406,82 @@ export async function searchCanvasGraphRag(tags: string, limit: number = 120): P
         data_state: "api_error",
         message: "GraphRAG 검색 중 오류가 발생했습니다."
       }
+    };
+  }
+}
+
+/**
+ * Canvas 자연어 질의 해석 + 검색 API
+ * POST /api/v1/canvas/ask
+ *
+ * 자유 형식의 한국어 질문을 백엔드 LLM이 태그로 해석한 뒤,
+ * 기존 /canvas/graphrag 와 동일한 아이템 셰이프로 검색 결과를 반환한다.
+ * 콜드 스타트 시 LLM 응답이 13~15초 걸릴 수 있어 타임아웃을 25초로 넉넉히 잡는다.
+ */
+export async function askCanvas(query: string, limit: number = 120): Promise<CanvasGraphRagResponse> {
+  try {
+    console.log("[API] askCanvas 호출", { query, limit });
+    const res = await axiosInstance.post<CanvasGraphRagResponse>(
+      '/canvas/ask',
+      { query, limit },
+      { timeout: 25000 }
+    );
+    console.log("[API] askCanvas 응답", res.data);
+    return res.data;
+  } catch (error) {
+    console.error("[API] askCanvas 실패", { query, error });
+    return {
+      status: "error",
+      query: {
+        tags: [],
+        resolved_tags: [],
+        unresolved_tags: [],
+      },
+      items: [],
+      meta: {
+        returned: 0,
+        data_state: "api_error",
+        message: "질문을 해석하는 중 오류가 발생했습니다."
+      },
+      interpretation: {
+        original_query: query,
+        extracted_tags: [],
+        source: "fallback_direct"
+      }
+    };
+  }
+}
+
+/**
+ * Canvas 자연어 질의 답변 API
+ * POST /api/v1/canvas/answer
+ *
+ * /canvas/ask 로 해석된 태그와 원본 질문을 바탕으로 자연어 답변을 생성한다.
+ * LLM 실패/타임아웃이나 검색 결과 0건이어도 백엔드는 HTTP 200 + answer:null 로 응답하므로,
+ * 이 함수는 실제 네트워크/axios 에러가 난 경우에만 answer:null + reason:"llm_unavailable" 로 통일해서 반환한다.
+ * 백엔드 문서상 최대 60초까지 걸릴 수 있으나 프론트에서는 30초로 제한한다.
+ */
+export interface CanvasAnswerResponse {
+  answer: string | null;
+  model?: string;
+  reason?: "llm_unavailable" | "no_results";
+}
+
+export async function getCanvasAnswer(query: string, tags: string[]): Promise<CanvasAnswerResponse> {
+  try {
+    console.log("[API] getCanvasAnswer 호출", { query, tags });
+    const res = await axiosInstance.post<CanvasAnswerResponse>(
+      '/canvas/answer',
+      { query, tags },
+      { timeout: 30000 }
+    );
+    console.log("[API] getCanvasAnswer 응답", res.data);
+    return res.data;
+  } catch (error) {
+    console.error("[API] getCanvasAnswer 실패", { query, tags, error });
+    return {
+      answer: null,
+      reason: "llm_unavailable"
     };
   }
 }
