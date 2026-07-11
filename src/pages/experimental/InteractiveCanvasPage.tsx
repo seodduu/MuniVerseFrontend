@@ -113,8 +113,8 @@ export default function InteractiveCanvasPage() {
     const [extractedTags, setExtractedTags] = useState<string[]>([]);
     const [interpretationSource, setInterpretationSource] = useState<"llm" | "fallback_direct" | null>(null);
     const [isInterpreting, setIsInterpreting] = useState(false); // "질문을 해석하는 중…" 스피너
+    const [isGeneratingAnswer, setIsGeneratingAnswer] = useState(false); // 태그 해석 완료 후 "답변을 생성하는 중…" 단계 안내
     const [answer, setAnswer] = useState<string | null>(null);
-    const [answerLoading, setAnswerLoading] = useState(false);
     const [showNoMatchHint, setShowNoMatchHint] = useState(false); // extracted_tags가 빈 배열일 때
 
     // Cache for search results
@@ -290,7 +290,6 @@ export default function InteractiveCanvasPage() {
             setIsLoading(true);
             setSearchError(null);
             setAnswer(null);
-            setAnswerLoading(false);
             setShowNoMatchHint(false);
             setExtractedTags([]);
             setInterpretationSource(null);
@@ -309,14 +308,16 @@ export default function InteractiveCanvasPage() {
             return;
         }
 
-        // 자연어 질의 경로: /canvas/ask 로 태그를 해석한 뒤 캔버스를 그리고,
-        // 별도로 /canvas/answer 를 논블로킹으로 호출해 답변 패널을 채운다.
+        // 자연어 질의 경로: /canvas/ask 로 태그를 해석한 뒤, /canvas/answer 로 자연어 답변까지
+        // 만들어질 때까지 기다렸다가 캔버스 + 태그 칩 + 답변 패널을 한 번에 공개한다.
+        // (답변이 늦게 와도 캔버스가 먼저 열려버리면 "빈 캔버스만 보이는" 어색한 순간이 생기므로,
+        //  답변 생성까지 하나의 사이클로 묶는다. 단, 답변 생성이 무한정 캔버스를 막지 않도록
+        //  아래에서 타임아웃으로 안전장치를 둔다.)
         const seq = ++requestSeqRef.current;
         setIsLoading(true);
         setIsInterpreting(true);
         setSearchError(null);
         setAnswer(null);
-        setAnswerLoading(false);
         setShowNoMatchHint(false);
 
         try {
@@ -325,11 +326,11 @@ export default function InteractiveCanvasPage() {
 
             const tags = response.interpretation?.extracted_tags ?? [];
             const source = response.interpretation?.source ?? null;
-            setExtractedTags(tags);
-            setInterpretationSource(source);
 
             if (tags.length === 0) {
                 // 질문을 이해하지 못한 경우: 캔버스는 그대로 두고 힌트만 노출, /answer 호출 안 함
+                setExtractedTags(tags);
+                setInterpretationSource(source);
                 setShowNoMatchHint(true);
                 setIsInterpreting(false);
                 setIsLoading(false);
@@ -340,31 +341,48 @@ export default function InteractiveCanvasPage() {
 
             const results = response.items || [];
             if (response.status !== "ok" || results.length === 0) {
+                // 검색 결과가 없으면 캔버스를 공개할 것이 없으므로 여기서 종료, /answer 호출 안 함
                 setSearchError(response.meta?.message || "검색 결과가 없습니다. 다른 태그로 시도해보세요.");
-            } else {
-                populateCanvasFromItems(results);
+                setIsInterpreting(false);
+                setIsLoading(false);
+                return;
             }
 
-            setIsInterpreting(false);
-            setIsLoading(false);
+            // 태그 해석은 끝났지만 답변 생성이 남아있으므로 오버레이 안내 문구를 다음 단계로 전환한다.
+            setIsGeneratingAnswer(true);
 
-            // /canvas/answer 는 캔버스 렌더링을 막지 않도록 별도로(await 없이) 진행한다.
-            setAnswerLoading(true);
-            getCanvasAnswer(q, tags).then((answerRes) => {
-                if (requestSeqRef.current !== seq) return; // 늦게 도착한 이전 요청 결과 무시
-                setAnswer(answerRes.answer ?? null);
-                setAnswerLoading(false);
-            }).catch((error) => {
-                if (requestSeqRef.current !== seq) return;
+            // /canvas/answer 는 캔버스 공개와 동시에 보여줄 답변을 만드는 단계라 await로 기다린다.
+            // 다만 답변 생성이 캔버스 공개를 무한정 막으면 안 되므로 30초 타임아웃을 두고,
+            // 타임아웃되면 답변 없이(answer=null) 캔버스+칩만 공개한다.
+            const ANSWER_TIMEOUT_MS = 30000;
+            let answerText: string | null = null;
+            try {
+                answerText = await Promise.race([
+                    getCanvasAnswer(q, tags).then((answerRes) => answerRes.answer ?? null),
+                    new Promise<null>((resolve) => setTimeout(() => resolve(null), ANSWER_TIMEOUT_MS)),
+                ]);
+            } catch (error) {
                 console.error("[Canvas] getCanvasAnswer 실패", error);
-                setAnswer(null);
-                setAnswerLoading(false);
-            });
+                answerText = null;
+            }
+
+            if (requestSeqRef.current !== seq) return; // 늦게 도착한 이전 요청 결과 무시
+
+            // 캔버스 + 태그 칩 + 답변을 한 시점에 함께 공개한다.
+            setExtractedTags(tags);
+            setInterpretationSource(source);
+            populateCanvasFromItems(results);
+            setAnswer(answerText);
+
+            setIsInterpreting(false);
+            setIsGeneratingAnswer(false);
+            setIsLoading(false);
         } catch (error) {
             if (requestSeqRef.current === seq) {
                 console.error("Ask failed:", error);
                 setSearchError("질문을 해석하는 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
                 setIsInterpreting(false);
+                setIsGeneratingAnswer(false);
                 setIsLoading(false);
             }
         }
@@ -378,7 +396,6 @@ export default function InteractiveCanvasPage() {
 
         const seq = ++requestSeqRef.current;
         setAnswer(null);
-        setAnswerLoading(false);
         setSearchError(null);
         setExtractedTags(remaining);
 
@@ -501,10 +518,10 @@ export default function InteractiveCanvasPage() {
                                 </button>
                             </div>
 
-                            {/* 질문 해석 중 안내 */}
-                            {isInterpreting && (
+                            {/* 질문 해석 중 / 답변 생성 중 안내 (자연어 질의 한 사이클 동안 단계별로 문구 전환) */}
+                            {(isInterpreting || isGeneratingAnswer) && (
                                 <div className="mt-4 p-3 rounded-xl bg-black/[0.03] text-black/60 text-center text-sm font-medium animate-fadeIn">
-                                    질문을 해석하는 중…
+                                    {isGeneratingAnswer ? "답변을 생성하는 중…" : "질문을 해석하는 중…"}
                                 </div>
                             )}
 
@@ -645,9 +662,11 @@ export default function InteractiveCanvasPage() {
                 </button>
             </div>
 
-            {/* 자연어 질의 답변 패널 (하단 고정, 캔버스를 가리지 않도록 bottom에만 배치) */}
+            {/* 자연어 질의 답변 패널 (하단 고정, 캔버스를 가리지 않도록 bottom에만 배치)
+                캔버스는 답변 생성이 끝난 시점에만 공개되므로, 이 패널이 보일 때는 answer가
+                이미 채워져 있거나(정상) 타임아웃으로 인해 아예 렌더링되지 않는다(안전장치). */}
             <AnimatePresence>
-                {!showOverlay && extractedTags.length > 0 && (answerLoading || answer) && (
+                {!showOverlay && extractedTags.length > 0 && answer && (
                     <motion.div
                         initial={{ opacity: 0, y: 20 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -656,15 +675,9 @@ export default function InteractiveCanvasPage() {
                         className="fixed bottom-8 left-1/2 -translate-x-1/2 z-40 w-full max-w-xl px-4 pointer-events-none"
                     >
                         <div className="pointer-events-auto bg-white/70 backdrop-blur-2xl border border-white/20 rounded-3xl px-6 py-4 shadow-[0_20px_50px_rgba(0,0,0,0.15)]">
-                            {answerLoading ? (
-                                <p className="text-sm text-black/50 font-medium text-center">
-                                    답변 생성 중…
-                                </p>
-                            ) : (
-                                <p className="text-sm text-black/80 font-medium leading-relaxed">
-                                    {answer}
-                                </p>
-                            )}
+                            <p className="text-sm text-black/80 font-medium leading-relaxed">
+                                {answer}
+                            </p>
                         </div>
                     </motion.div>
                 )}
